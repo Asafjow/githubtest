@@ -5,7 +5,7 @@
   <body>
   <?php   
     echo "Hello World!";
-	 $name = 'John';
+	 $name = 'John master ';
    $age = 25;
    echo $name;
   ?>
