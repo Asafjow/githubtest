@@ -4,8 +4,8 @@
   </head>
   <body>
   <?php   
-    echo "Hello World!";
-	 $name = 'Asaf jow master   changes  ';
+    echo "Hello World! \n ";
+	 $name = 'Asafjow \n master \n changes  ';
    $age = 25;
    echo $name;
   ?>
