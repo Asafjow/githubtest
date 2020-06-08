@@ -1,0 +1,235 @@
+#include "pch.h"
+#include <fstream>
+#include <iostream>
+#include "EpUtils/RegUtils.h"
+#include "ScannedFileMock.h"
+#include "SAEngine.h"
+#include "SAScanner.h"
+#include <ctime>
+#include "EpUtils/UtfUtils.h"
+#include <Generated/saservice.pb.h>
+
+#pragma comment(lib, "shlwapi.lib")
+
+using namespace NGAV;
+
+
+static const string kSACfgRegName = "SA.config";
+static const uint8_t MinNumberOfFiles = 20;
+static const int MaxPathLength = 4096;
+const double NoPredictionConfidence = 0.0;
+string prefix;
+SAScanner* gScanner;
+//TODO
+double minBlockThreshold = 0.29755402302461903;
+
+
+enum Result { BENIGN, MALICIOUS_BY_AV, MALICIOUS_BY_SA, SCAN_ERROR };
+
+struct ResultStruct
+{
+    Result result;
+    double saProba;
+};
+
+
+
+
+inline std::string resultToString(Result result) 
+{
+    switch(result)
+    {
+        case (Result::BENIGN): return "BENIGN";
+        case (Result::MALICIOUS_BY_AV): return "MALICIOUS";
+        case (Result::MALICIOUS_BY_SA): return "MALICIOUS";
+        case (Result::SCAN_ERROR): return "ERROR";
+    }
+    //should never happen
+    throw std::exception("Unexpected result value");
+}
+
+std::wstring findSubFolder(const std::wstring& path)
+{
+    WIN32_FIND_DATA data;
+    std::wstring spec = path + L"\\" + L"*";
+    HANDLE hFind = FindFirstFile(spec.c_str(), &data);
+
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        throw std::exception("Unexpected error while inspecting the directory");
+    }
+
+    do
+    {
+        std::wstring fileName(data.cFileName);
+        if ((fileName == L".") || (fileName == L"..")) continue;
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return L"subfolder: " + fileName;
+    }
+    while (FindNextFile(hFind, &data));
+
+    if (GetLastError() != ERROR_NO_MORE_FILES) {
+        FindClose(hFind);
+        return L"Error Investigating Dir";
+    }
+
+    FindClose(hFind);
+    return L"";
+}
+
+bool predictFile(const string& path, std::unordered_map<string, ResultStruct>& SAresults)
+{
+    string fullPathStr = path;
+    try
+    {
+        CHAR buffer[MaxPathLength] = { 0 };
+        if (0 == GetFullPathNameA(path.c_str(), MaxPathLength, buffer, nullptr))
+        {
+      //      //LOG(error) << " error while getting full File Path of file " << path;
+            SAresults[path] = { Result::SCAN_ERROR, NoPredictionConfidence };
+            return false;
+        }
+        fullPathStr.assign(buffer);
+        std::transform(fullPathStr.begin(), fullPathStr.end(), fullPathStr.begin(), ::tolower);
+        std::wstring fullPath = UtfUtils::utf8To16(fullPathStr);
+              
+        ScannedFileMock scannedFile(fullPath, false);
+        double maliciousProba = gScanner->getSAScore(&scannedFile);
+        //LOG(info) << "maliciousProba " << maliciousProba;
+        if (maliciousProba == (-1.0))
+        {
+            std::cout << "Got an error for file " << UtfUtils::utf16To8(fullPath);
+            SAresults[fullPathStr] = { Result::SCAN_ERROR, NoPredictionConfidence };
+            return false;
+        }
+        if (maliciousProba > minBlockThreshold)
+        {
+          //  //LOG(info) << "File " << fullPathStr << " classified by SA as malicious";
+            SAresults[fullPathStr] = { Result::MALICIOUS_BY_SA, maliciousProba };
+        }
+        else
+        {
+           // //LOG(info) << "File " << fullPathStr << " classified by SA as benign";
+            SAresults[fullPathStr] = { Result::BENIGN, maliciousProba };
+        }
+        return true;
+    }
+    catch (const std::exception&) 
+    {
+       // //LOG(error) << path << ", unknown exception: " << NGAV::Utils::toCsvEncoded(e.what());
+        SAresults[fullPathStr] = { Result::SCAN_ERROR, NoPredictionConfidence };
+        return false;
+    }
+}
+
+bool predictFileSafe(const string& fullPath, std::unordered_map<string, ResultStruct>& SAresults)
+{
+    __try
+    {
+        return predictFile(fullPath, SAresults);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        std::cout << "windows exception: " << fullPath << " code: " << GetExceptionCode() << std::endl;
+        return false;
+    }
+}
+
+void predictDir(const string& dirName, std::unordered_map<string, ResultStruct>& SAresults)
+{
+    WIN32_FIND_DATA data;
+    wstring dirNameW = UtfUtils::utf8To16(dirName);
+    wstring dirAll = dirNameW + L"\\*";
+
+    //LOG(info) << "Start inspecting dir " << dirName;
+
+    HANDLE hFind = FindFirstFile(dirAll.c_str(), &data);
+
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        //LOG(error) << "FindFirstFile failed " << GetLastError();
+
+        throw std::exception("Unexpected error in predictDir");
+    }
+    else
+    {
+        //LOG(info) << "Inspecting files in dir ...";
+        cout << "Inspecting files...";
+        do
+        {
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::wstring fileNameW(data.cFileName);
+            std::string fileName = UtfUtils::utf16To8(fileNameW);
+            std::string fullPath = dirName + "\\" + fileName;
+           
+            if (!predictFileSafe(fullPath, SAresults))
+            {
+                std:: cout << " error while predicting "<< fullPath<<std::endl;
+            }
+            cout << ".";
+        } while (FindNextFile(hFind, &data));
+        FindClose(hFind);
+    }
+    cout << std::endl;
+}
+
+
+void printHelp(const char *programName)
+{
+    std::cout << "usage: " << programName << " <target>"
+        << "\ntarget: target folder/file to inspect\n" << std::endl;
+}
+
+
+string createCSV(const std::unordered_map<string, ResultStruct>& results, const string& logSuffix)
+{
+    string csvFileName = prefix + "SA_" + logSuffix + ".csv";
+    ofstream outputFile;
+    outputFile.open(csvFileName, std::ios::out);
+    outputFile << "File path,Scan result,SA malicious probability" << std::endl;
+    for (auto resultPair : results) 
+    {
+        outputFile << resultPair.first << "," << resultToString(resultPair.second.result);
+        outputFile << "," << std::to_string(resultPair.second.saProba);
+        outputFile << std::endl;
+    }
+    return csvFileName;
+}
+
+
+bool writeSAConfig(double detectThreshold, double blockThreshold)
+{
+    using StaticAnalysisServiceConfig = com::cyber::activeprobe::transport::StaticAnalysisServiceConfig;
+    StaticAnalysisServiceConfig protoCfg;
+    protoCfg.set_detectthreshold(detectThreshold);
+    protoCfg.set_blockthreshold(blockThreshold);
+    protoCfg.set_modelid("modelId");
+    protoCfg.set_report_threshold(0.2);
+
+    std::string configBlob = protoCfg.SerializeAsString();
+    std::string protoEncoded = Utils::base64_encode(configBlob.c_str(), (unsigned int)configBlob.length());
+    if (!RegistryUtils::writeSettingToRegistry(CYBEREASON_ACTIVEPROBE_REGISTRY_KEY, kSACfgRegName, protoEncoded, REG_SZ))
+    {
+        cout << "failed to write configuration to registry for " << kSACfgRegName;
+        return false;
+    }
+    return true;
+}
+//
+//
+        ScannerBase::ScannerReturnCodes code;
+        gScanner = dynamic_cast<SAScanner*>(get_scanner(&code));
+        gScanner->startScanner();
+        //LOG(info) << "Target: " << target << " noSig: " << noSig;
+        std::wstring targetWstr = UtfUtils::utf8To16(target);
+        DWORD attr = GetFileAttributes(targetWstr.c_str());
+
+      
+    catch (const std::exception& e)
+    {
+        //LOG(error) << "encountered an exception " << e.what();
+        std::cout << "exception in main " << e.what() << std::endl;
+        gScanner->stopScanner();
+        destroy_scanner(gScanner);
+        return 1;
+    }
+}
