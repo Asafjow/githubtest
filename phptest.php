@@ -48,7 +48,7 @@ function drop(ev) {
    <img id="image" src="sample.jpg" draggable="true"
    ondragstart="drag(event)" width="150" height="50" alt="" />
 	<script>
-	//localStorage.setItem("key1", "Itay Google key is :SSregrew g !!");
+	//localStora33ge.setItem("key1", "Itay Google key is :SSregrew g !!");
 	//alert(localStorage.getItem("key1")); 
 	
 	</script> 
